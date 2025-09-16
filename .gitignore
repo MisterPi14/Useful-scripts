@@ -1,2 +1,7 @@
 eliminar
 comprimidos
+
+// Audio transcription
+
+*.mp3
+LocalAudioTranscription/audio_transcription
