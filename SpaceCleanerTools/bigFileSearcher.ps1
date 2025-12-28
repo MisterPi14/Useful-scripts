@@ -66,7 +66,7 @@ if ($opcion -eq '1') {
 }
 
 # Crear carpeta de salida
-$outputDir = Join-Path $PSScriptRoot "Top 20 mas grandes por carpeta"
+$outputDir = Join-Path $PSScriptRoot "Top 20 archivos"
 if (-not (Test-Path $outputDir)) {
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
     Write-Host "`nCarpeta de salida creada: $outputDir" -ForegroundColor Yellow
@@ -87,32 +87,95 @@ function Format-Size {
     return ("{0:N2} {1}" -f $value, $units[$i])
 }
 
+# Función modular de búsqueda con optimización O(N)
+function Find-HeavyFiles {
+    param (
+        [string]$Path,
+        [string]$ActivityName,
+        [scriptblock]$CustomFilter,
+        [int]$TopCount = 20,
+        [System.Diagnostics.Stopwatch]$Timer
+    )
+    
+    # Lista para mantener solo los Top K archivos.
+    # Se mantendrá ordenada ascendentemente por tamaño (índice 0 = el más pequeño de los grandes).
+    $topFiles = New-Object System.Collections.Generic.List[PSObject]
+    $counter = 0
+    
+    if (Test-Path $Path) {
+        Get-ChildItem -Path $Path -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $counter++
+            if ($counter % 1000 -eq 0) {
+                $timeStr = if ($Timer) { " | Tiempo: $($Timer.Elapsed.ToString('mm\:ss'))" } else { "" }
+                Write-Host -NoNewline "`r[$ActivityName] Archivos: $counter$timeStr   "
+            }
+
+            $item = $_
+            
+            # Filtros Globales (Sistema y Extensiones)
+            if ($item.Attributes -band [IO.FileAttributes]::System) { return }
+            $ext = ($item.Extension).TrimStart('.').ToLower()
+            if ($excludeExtensions -contains $ext) { return }
+
+            # Filtro Personalizado
+            if ($CustomFilter) {
+                $shouldKeep = & $CustomFilter $item
+                if (-not $shouldKeep) { return }
+            }
+
+            # --- ALGORITMO OPTIMIZADO (Min-Heap simulado) ---
+            # Complejidad Espacial: O(K) donde K=20
+            # Complejidad Temporal: O(N)
+            
+            try {
+                if ($topFiles.Count -lt $TopCount) {
+                    $topFiles.Add($item)
+                    if ($topFiles.Count -eq $TopCount) {
+                        # Ordenar inicial para tener el menor en index 0
+                        $sorted = $topFiles | Sort-Object Length
+                        $topFiles.Clear()
+                        $topFiles.AddRange([PSObject[]]$sorted)
+                    }
+                }
+                else {
+                    # Si el archivo actual es más grande que el más pequeño de nuestro Top 20
+                    if ($item.Length -gt $topFiles[0].Length) {
+                        $topFiles[0] = $item
+                        # Reordenar lista pequeña (muy rápido para 20 items)
+                        $sorted = $topFiles | Sort-Object Length
+                        $topFiles.Clear()
+                        $topFiles.AddRange([PSObject[]]$sorted)
+                    }
+                }
+            } catch {
+                # Ignorar errores puntuales en archivos problematicos
+            }
+        }
+        # Limpiar linea al terminar esta carpeta
+        Write-Host -NoNewline "`r[$ActivityName] Completado. ($counter archivos)          `n"
+    }
+    # Retornar ordenado descendente (Mayor a menor) para el reporte
+    return $topFiles | Sort-Object Length -Descending
+}
+
 # --- PROCESAMIENTO ---
+$scriptTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
 if ($isFullDriveScan) {
     Write-Host "`nEscaneando todo el disco $searchRoot (esto puede tardar)..." -ForegroundColor Cyan
-    $allFiles = New-Object System.Collections.Generic.List[PSObject]
     
-    # Obtener todos los archivos recursivamente
-    Get-ChildItem -Path $searchRoot -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-        $item = $_
-        
-        # Filtros basicos
-        # if ($item.Attributes -band [IO.FileAttributes]::Hidden) { return }
-        if ($item.Attributes -band [IO.FileAttributes]::System) { return }
-        
-        # Filtro de extensiones
-        $ext = ($item.Extension).TrimStart('.').ToLower()
-        if ($excludeExtensions -contains $ext) { return }
-        
-        # Filtro de carpetas de sistema (Windows)
-        if ($item.FullName -match '\\Windows\\') { return }
-        
-        $allFiles.Add($item)
+    # Filtro específico para escaneo de disco completo
+    $driveFilter = {
+        param($f)
+        # Excluir carpeta Windows
+        if ($f.FullName -match '\\Windows\\') { return $false }
+        return $true
     }
+
+    $top20Files = Find-HeavyFiles -Path $searchRoot -ActivityName "Escaneando Disco Completo" -CustomFilter $driveFilter -Timer $scriptTimer
     
-    if ($allFiles.Count -gt 0) {
-        $top20 = $allFiles | Sort-Object Length -Descending | Select-Object -First 20 `
-            | Select-Object @{Name='FullName';Expression={$_.FullName}},
+    if ($top20Files.Count -gt 0) {
+        $top20 = $top20Files | Select-Object @{Name='FullName';Expression={$_.FullName}},
                            @{Name='SizeBytes';Expression={$_.Length}},
                            @{Name='SizeHuman';Expression={ Format-Size $_.Length }},
                            @{Name='LastWriteTime';Expression={$_.LastWriteTime}}
@@ -139,24 +202,16 @@ if ($isFullDriveScan) {
 
             $targetPath = Join-Path $userDir $folderType
             
-            if (Test-Path $targetPath) {
-                try {
-                    $items = Get-ChildItem -Path $targetPath -File -Recurse -ErrorAction SilentlyContinue
-                    foreach ($item in $items) {
-                        # Filtros
-                        # if ($item.Attributes -band [IO.FileAttributes]::Hidden) { continue }
-                        if ($item.Attributes -band [IO.FileAttributes]::System) { continue }
-                        
-                        $ext = ($item.Extension).TrimStart('.').ToLower()
-                        if ($excludeExtensions -contains $ext) { continue }
-                        
-                        if ($item.FullName -match '\\AppData\\') { continue }
+            # Filtro específico para carpetas de usuario
+            $userFolderFilter = {
+                param($f)
+                if ($f.FullName -match '\\AppData\\') { return $false }
+                return $true
+            }
 
-                        $filesOfType += $item
-                    }
-                } catch {
-                    # Ignorar errores de acceso
-                }
+            $found = Find-HeavyFiles -Path $targetPath -ActivityName "Buscando en $folderType ($($_.Name))" -CustomFilter $userFolderFilter -Timer $scriptTimer
+            if ($found) {
+                $filesOfType += $found
             }
         }
 
@@ -177,5 +232,8 @@ if ($isFullDriveScan) {
         }
     }
 }
+
+$scriptTimer.Stop()
+Write-Host ("`nTiempo total de ejecucion: {0:hh}:{0:mm}:{0:ss}.{0:fff}" -f $scriptTimer.Elapsed) -ForegroundColor DarkCyan
 
 Write-Host "`nProceso finalizado." -ForegroundColor Cyan
