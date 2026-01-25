@@ -1,5 +1,6 @@
 import os
 import pickle
+import time
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -9,8 +10,11 @@ from googleapiclient.http import MediaFileUpload
 RUTAS_FILE = 'rutas.txt'
 # Archivo de secretos descargado de Google Cloud Console
 CLIENT_SECRETS_FILE = 'client_secret.json'
-# Alcance de permisos necesarios para subir videos
-SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+# Alcance de permisos necesarios para subir videos y verificar estado
+SCOPES = [
+    'https://www.googleapis.com/auth/youtube.upload',
+    'https://www.googleapis.com/auth/youtube.readonly'
+]
 API_SERVICE_NAME = 'youtube'
 API_VERSION = 'v3'
 
@@ -43,7 +47,73 @@ def get_authenticated_service():
 
     return build(API_SERVICE_NAME, API_VERSION, credentials=creds)
 
-def upload_video(youtube, file_path):
+def verify_upload(youtube, video_id):
+    """Verifica el estado del video en YouTube antes de eliminar el local."""
+    print(f"Verificando estado del video ID: {video_id}...")
+    attempt = 1
+    
+    while True:
+        try:
+            request = youtube.videos().list(
+                part="status,processingDetails",
+                id=video_id
+            )
+            response = request.execute()
+            
+            if not response.get('items'):
+                print(f"Intento {attempt}: Video no encontrado en API aun. Esperando...")
+                time.sleep(5)
+                attempt += 1
+                continue
+                
+            status = response['items'][0]['status']
+            upload_status = status.get('uploadStatus')
+            
+            print(f"Intento {attempt} | Estado en YouTube: {upload_status}")
+            
+            # 'uploaded': Subida completada exitosamente (YouTube ya tiene el archivo raw)
+            # 'processed': Ya procesado
+            if upload_status in ['uploaded', 'processed']:
+                print("Verificación exitosa: YouTube ha recibido el archivo correctamente.")
+                return True
+            
+            if upload_status in ['rejected', 'failed']:
+                print("ERROR FATAL: El video fue rechazado o falló la subida.")
+                return False
+                
+        except Exception as e:
+            # Si es un error de permisos (403), no tiene sentido reintentar infinitamente sin cambios
+            if "insufficient authentication scopes" in str(e):
+                print("\nERROR CRÍTICO DE PERMISOS:")
+                print("El token actual no tiene permisos para 'leer' el estado del video.")
+                print("SOLUCIÓN: Borra el archivo 'token.pickle' y ejecuta el script de nuevo para re-autorizar.")
+                return False
+                
+            print(f"Error verificando (Intento {attempt}): {e}")
+            
+        time.sleep(5)
+        attempt += 1
+
+def deleteUploadedFiles(file_path):
+    """Elimina el archivo local tras verificar subida."""
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"ELIMINADO LOCALMENTE: {file_path}")
+    except OSError as e:
+        # Si está bloqueado (WinError 32), esperar un poco y reintentar
+        if e.errno == 32: # ERROR_SHARING_VIOLATION
+            print("Archivo retenido por el sistema, reintentando borrar en 5 segundos...")
+            time.sleep(5)
+            try:
+                os.remove(file_path)
+                print(f"ELIMINADO LOCALMENTE (Reintento): {file_path}")
+            except Exception as e2:
+                 print(f"ERROR FINAL al eliminar {file_path}: {e2}")
+        else:
+            print(f"ERROR al eliminar {file_path}: {e}")
+
+def upload_video(youtube, file_path, delete_after_upload=False):
     """Sube un video a YouTube."""
     try:
         # Limpiar comillas si existen en la ruta
@@ -86,7 +156,19 @@ def upload_video(youtube, file_path):
             if status:
                 print(f"Progreso subida: {int(status.progress() * 100)}%")
 
-        print(f"COMPLETADO: El video {filename} se subió con ID: {response['id']}\n")
+        video_id = response.get('id')
+        print(f"COMPLETADO: El video {filename} se subió con ID: {video_id}\n")
+
+        # IMPORTANTE: Liberar referencias al archivo para evitar WinError 32
+        media = None
+        request = None
+
+        # Verificar éxito con la API y eliminar si se solicitó
+        if delete_after_upload and video_id:
+            if verify_upload(youtube, video_id):
+                deleteUploadedFiles(clean_path)
+            else:
+                print("AVISO: No se borró el archivo porque no se pudo verificar la subida exitosa.")
 
     except Exception as e:
         print(f"ERROR al subir {file_path}: {str(e)}")
@@ -94,6 +176,22 @@ def upload_video(youtube, file_path):
 def main():
     if not os.path.exists(RUTAS_FILE):
         print(f"No se encontró el archivo {RUTAS_FILE}")
+        return
+
+    print("--- OPCIONES DE SUBIDA ---")
+    print("1. Subir videos y MANTENER archivos originales")
+    print("2. Subir videos y ELIMINAR archivos originales (Borrado definitivo)")
+    opcion = input("Seleccione una opción (1/2): ").strip()
+    
+    delete_files = False
+    if opcion == '2':
+        confirm = input("¿Está seguro que desea ELIMINAR los archivos tras la subida? (s/n): ").lower()
+        if confirm == 's':
+            delete_files = True
+        else:
+            print("Operación cancelada. Se mantendrán los archivos.")
+    elif opcion != '1':
+        print("Opción no válida. Saliendo...")
         return
 
     youtube = get_authenticated_service()
@@ -108,7 +206,7 @@ def main():
     for ruta in rutas:
         ruta = ruta.strip()
         if ruta:
-            upload_video(youtube, ruta)
+            upload_video(youtube, ruta, delete_after_upload=delete_files)
             
     print("=== Proceso finalizado ===")
 
