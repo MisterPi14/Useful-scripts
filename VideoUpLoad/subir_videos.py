@@ -129,7 +129,7 @@ def upload_video(youtube, file_path, delete_after_upload=False):
         body = {
             'snippet': {
                 'title': filename,  # Usamos el nombre del archivo como título
-                'description': 'Subido automáticamente vía script Python',
+                'description': f'Subido automáticamente vía script Python \n\nRuta original: {clean_path}',
                 'tags': ['auto-upload'],
                 'categoryId': '22' # Categoría 'People & Blogs', puedes cambiarla
             },
