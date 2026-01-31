@@ -94,6 +94,14 @@ def verify_upload(youtube, video_id):
         time.sleep(5)
         attempt += 1
 
+def format_file_size(size_bytes):
+    """Formatea el tamaño del archivo con prefijos apropiados (KB, MB, GB, TB)."""
+    for unit in ['Bytes', 'KB', 'MB', 'GB', 'TB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.2f} PB"
+
 def deleteUploadedFiles(file_path):
     """Elimina el archivo local tras verificar subida."""
     try:
@@ -124,12 +132,14 @@ def upload_video(youtube, file_path, delete_after_upload=False):
             return
 
         filename = os.path.basename(clean_path)
-        print(f"Subiendo: {filename} ...")
+        file_size = os.path.getsize(clean_path)
+        formatted_size = format_file_size(file_size)
+        print(f"Subiendo: {filename} ({formatted_size}) ...")
 
         body = {
             'snippet': {
                 'title': filename,  # Usamos el nombre del archivo como título
-                'description': f'Subido automáticamente vía script Python \n\nRuta original: {clean_path}',
+                'description': f'Subido automáticamente vía script Python \n\nRuta original: {clean_path}\nTamaño: {formatted_size}',
                 'tags': ['auto-upload'],
                 'categoryId': '22' # Categoría 'People & Blogs', puedes cambiarla
             },
